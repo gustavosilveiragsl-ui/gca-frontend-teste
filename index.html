@@ -16509,8 +16509,10 @@ document.addEventListener('DOMContentLoaded',()=>{
 // ══════════════════════════════════════════════════════
 // SUPABASE REALTIME — Atualizações em tempo real
 // ══════════════════════════════════════════════════════
-const _SUPABASE_URL  = 'https://hyrpvxzcfikdxzsqebnu.supabase.co';
-const _SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh5cnB2eHpjZmlrZHh6c3FlYm51Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAwOTEyMTIsImV4cCI6MjA5NTY2NzIxMn0.8QRb3lr8Bf9UNL0LiE4IifcHoobDWVOsFvax-_GnGzU';
+// Ambiente de teste: aponta o Realtime pro projeto GCA-TESTE, não pra produção —
+// isola de verdade o ambiente de teste (antes usava a chave/URL de produção mesmo aqui).
+const _SUPABASE_URL  = 'https://ybuuqykmdlfxuareytkc.supabase.co';
+const _SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlidXVxeWttZGxmeHVhcmV5dGtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ2NTIzODgsImV4cCI6MjEwMDIyODM4OH0.g6raWrTkyzaWuTfAQRRTlf8eKolsU1Iu6xZuaFE3k7g';
 let _supabaseClient = null;
 let _realtimeCanal  = null;
 
@@ -16607,20 +16609,29 @@ function _iniciarRealtime() {
   // Remove canal anterior se existir
   if (_realtimeCanal) { sb.removeChannel(_realtimeCanal); _realtimeCanal = null; }
 
+  // Não assina mais as tabelas reais direto — elas têm RLS sem policy pra chave anon
+  // (não pode ter policy ampla nelas, tem senha/PII). Em vez disso escuta uma tabela
+  // sinalizadora (realtime_sinal) que só guarda "qual tabela mudou e quando", populada
+  // por gatilhos no banco. Sem exposição de dado nenhum, e o Realtime volta a funcionar.
+  const _MAPA_SINAL_RECARGA = {
+    solicitacoes_material: _recarregarSols,
+    atendimentos:          _recarregarAss,
+    saldos:                _recarregarEstoque,
+    colaboradores:         _recarregarColabs,
+    itens:                 _recarregarItens,
+    armazens:              _recarregarArmazens,
+    equipes:               _recarregarEquipes,
+    catalogo_dotacao:      _recarregarDotacao,
+    usuarios:              _recarregarUsuarios,
+    logins_solicitacao:    _recarregarUsuarios,
+  };
+
   _realtimeCanal = sb
     .channel('gca-realtime')
-    // ── Operacional ──
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitacoes_material' }, () => _recarregarSols())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'atendimentos'          }, () => _recarregarAss())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'saldos'                }, () => _recarregarEstoque())
-    // ── Cadastros ──
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'colaboradores'         }, () => _recarregarColabs())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'itens'                 }, () => _recarregarItens())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'armazens'              }, () => _recarregarArmazens())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'equipes'               }, () => _recarregarEquipes())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'catalogo_dotacao'      }, () => _recarregarDotacao())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'usuarios'              }, () => _recarregarUsuarios())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'logins_solicitacao'    }, () => _recarregarUsuarios())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'realtime_sinal' }, (payload) => {
+      const tabela = payload.new?.tabela || payload.old?.tabela;
+      _MAPA_SINAL_RECARGA[tabela]?.();
+    })
     .subscribe((status) => {
       if (status === 'SUBSCRIBED') {
         console.log('[GCA Realtime] ✅ Conectado — todas as tabelas em tempo real');

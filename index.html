@@ -1738,7 +1738,7 @@ window.addEventListener('pageshow', function(e) {
       <div class="view" id="view-transferencia">
         <div class="view-toggle-log" style="margin-bottom:16px;display:inline-flex">
           <button class="active" id="trfTabArm" onclick="trfMudarAba('armazens')">🏬 Entre armazéns</button>
-          <button id="trfTabFil" onclick="trfMudarAba('filiais')">🏢 Entre filiais</button>
+          <button id="trfTabFil" onclick="trfMudarAba('filiais')">🏢 Entre filiais <span id="trfBadgeFil" class="hidden" style="background:var(--red);color:#fff;border-radius:999px;padding:0 6px;font-size:10px;margin-left:4px">0</span></button>
         </div>
         <div id="trfPainelArmazens">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start">
@@ -1885,8 +1885,8 @@ window.addEventListener('pageshow', function(e) {
             <div class="card-header">
               <div><div class="card-title">Transferências entre filiais</div><div class="card-sub">As que sua filial enviou e as que vão chegar</div></div>
               <div style="display:flex;gap:8px;align-items:center">
-                <select id="tflFiltroDirecao" class="form-input" style="width:150px;font-size:11px" onchange="tflRenderLista()">
-                  <option value="">Todas</option><option value="ENVIADA">Enviadas</option><option value="RECEBIDA">A receber</option>
+                <select id="tflFiltroDirecao" class="form-input" style="width:170px;font-size:11px" onchange="tflRenderLista()">
+                  <option value="">Todas</option><option value="ACAO">👉 Pendentes comigo</option><option value="ENVIADA">Enviadas</option><option value="RECEBIDA">A receber</option>
                 </select>
                 <button class="btn btn-ghost" onclick="tflCarregarLista()">↻</button>
               </div>
@@ -9178,6 +9178,7 @@ function trfPodeFiliais() {
 function trfPrepararAbas() {
   const btn = document.getElementById('trfTabFil');
   if (btn) btn.style.display = trfPodeFiliais() ? '' : 'none';
+  tflAtualizarPendencias();
   if (document.getElementById('trfTabFil')?.classList.contains('active')) {
     if (trfPodeFiliais()) tflIniciar(); else trfMudarAba('armazens');
   }
@@ -9432,13 +9433,14 @@ async function tflCarregarLista() {
   _tflLista = res?.ok ? (res.data || []) : [];
   if (!res?.ok) toast(res?.erro || 'Erro ao carregar as transferências', 'error');
   tflRenderLista();
+  tflAtualizarPendencias();
 }
 
 function tflRenderLista() {
   const box = document.getElementById('tflLista');
   if (!box) return;
   const dir = tflVal('tflFiltroDirecao');
-  const lista = [..._tflLista].filter(t => !dir || t.direcao === dir)
+  const lista = [..._tflLista].filter(t => !dir || (dir === 'ACAO' ? !!tflMinhaVez(t) : t.direcao === dir))
     .sort((a, b) => String(b.criado_em).localeCompare(String(a.criado_em)));
   if (!lista.length) {
     box.innerHTML = `<div class="empty-state" style="padding:20px"><div class="es-title">Nenhuma transferência entre filiais</div></div>`;
@@ -9452,6 +9454,7 @@ function tflRenderLista() {
         <div style="font-size:11px;color:var(--text-3);margin-top:2px">${t.criado_em ? formatarData(t.criado_em.slice(0, 10)) : '—'} · ${escHtml(TFL_MEIO[t.meio_transporte] || t.meio_transporte)} · ${tflDinheiro(t.valor_total)} · por ${escHtml(t.criado_por || '—')}</div>
       </div>
       <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+        ${tflMinhaVez(t) ? `<span style="font-size:10px;font-weight:700;color:var(--accent-text)">👉 ${tflMinhaVez(t)}</span>` : ''}
         ${tflBadge(t.status)}
         <button class="row-action" onclick="tflAbrirDetalhe('${escJs(t.id)}')">Ver</button>
         <button class="row-action" onclick="tflBaixar('${escJs(t.id)}','pdf','${escJs(t.numero)}')">PDF</button>
@@ -9473,10 +9476,46 @@ async function tflBaixar(id, formato, numero) {
   } catch { toast('Erro ao gerar o documento', 'error'); }
 }
 
+function tflDataHora(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d) ? '—' : d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+// O que a MINHA filial precisa fazer nesta transferência agora (vazio = nada).
+function tflMinhaVez(t) {
+  const rec = temPermissao('transferencia_filial_receber'), env = temPermissao('transferencia_filial');
+  if (t.direcao === 'RECEBIDA' && t.status === 'AGUARDANDO_ACEITE' && rec) return 'Aceitar ou recusar';
+  if (t.direcao === 'RECEBIDA' && t.status === 'NF_ANEXADA' && rec) return 'Registrar o recebimento';
+  if (t.direcao === 'ENVIADA' && t.status === 'ACEITA' && env) return 'Anexar a nota fiscal';
+  return '';
+}
+
+async function tflAtualizarPendencias() {
+  const badge = document.getElementById('trfBadgeFil');
+  if (!badge || !trfPodeFiliais()) return;
+  const res = await api('/transferencias-filiais/pendencias');
+  const n = res?.ok ? Number(res.data?.total) || 0 : 0;
+  badge.textContent = n;
+  badge.classList.toggle('hidden', !n);
+}
+
+let _tflDetalhe = null;
+
 async function tflAbrirDetalhe(id) {
   const res = await api(`/transferencias-filiais/${id}`);
   if (!res?.ok) { toast(res?.erro || 'Erro ao abrir a transferência', 'error'); return; }
-  const t = res.data;
+  _tflDetalhe = res.data;
+  tflRenderDetalhe();
+  document.getElementById('modalTflDetalhe').classList.remove('hidden');
+}
+
+function tflRenderDetalhe() {
+  const t = _tflDetalhe;
+  if (!t) return;
+  const souOrigem = t.direcao === 'ENVIADA', souDestino = !souOrigem;
+  const podeEnv = temPermissao('transferencia_filial'), podeRec = temPermissao('transferencia_filial_receber');
+  const idJs = escJs(t.id);
   const r = t.remetente_json || {}, d = t.destinatario_json || {}, tr = t.transporte_json || {};
   const end = (p) => [[p.endereco, p.numero].filter(Boolean).join(', '), p.complemento, p.bairro, [p.cidade, p.uf].filter(Boolean).join(' - '), p.cep].filter(Boolean).join(' · ');
   const bloco = (titulo, p) => `
@@ -9490,12 +9529,27 @@ async function tflAbrirDetalhe(id) {
     : t.meio_transporte === 'TRANSPORTADORA'
       ? [['Transportadora', tr.nome_transportadora || '—'], ['CNPJ', tr.cnpj_transportadora]]
       : [['Envio', 'Correios']];
+  const temRec = (t.itens || []).some(i => i.quantidade_recebida != null);
+
+  // Linha do tempo: tudo o que aconteceu, na ordem.
+  const eventos = [
+    ['📝', 'Criada', t.criado_em, t.criado_por],
+    t.aceito_em && ['✔', 'Aceita pelo destino — material saiu do estoque de origem', t.aceito_em, t.aceito_por],
+    t.recusado_em && ['✖', `Recusada — ${t.motivo_recusa || ''}`, t.recusado_em, t.recusado_por],
+    t.nf_anexada_em && ['📄', `Nota fiscal ${t.nf_numero ? 'nº ' + t.nf_numero + ' ' : ''}anexada`, t.nf_anexada_em, t.nf_anexada_por],
+    t.recebido_em && ['📥', `Recebida em ${t.nome_armazem_destino || '—'}`, t.recebido_em, t.recebido_por],
+    t.cancelado_em && ['🚫', `Cancelada — ${t.motivo_cancelamento || ''}`, t.cancelado_em, t.cancelado_por],
+  ].filter(Boolean).sort((a, b) => String(a[2]).localeCompare(String(b[2])));
+
+  const linkNf = t.nf_pdf_url && /^https:\/\//.test(t.nf_pdf_url) ? t.nf_pdf_url : '';
+  const podeAnexar = souOrigem && podeEnv && ['ACEITA', 'NF_ANEXADA'].includes(t.status);
 
   document.getElementById('tflDetTitulo').innerHTML = `${escHtml(t.numero)} ${tflBadge(t.status)}`;
   document.getElementById('tflDetSub').textContent =
-    `${t.direcao === 'ENVIADA' ? 'Enviada' : 'Recebida'} · criada em ${t.criado_em ? formatarData(t.criado_em.slice(0, 10)) : '—'} por ${t.criado_por || '—'} · responsável ${t.nome_responsavel || '—'}`;
+    `${souOrigem ? 'Enviada' : 'Recebida'} · criada em ${tflDataHora(t.criado_em)} por ${t.criado_por || '—'} · responsável ${t.nome_responsavel || '—'}`;
 
   document.getElementById('tflDetBody').innerHTML = `
+    ${tflMinhaVez(t) ? `<div style="background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.35);border-radius:var(--radius-sm);padding:8px 12px;font-size:12px;font-weight:600;color:var(--accent-text);margin-bottom:12px">👉 Sua vez: ${tflMinhaVez(t)}</div>` : ''}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">${bloco('Remetente', r)}${bloco('Destinatário', d)}</div>
 
     <div class="tfl-secao">Transporte — ${escHtml(TFL_MEIO[t.meio_transporte] || '')}</div>
@@ -9503,15 +9557,22 @@ async function tflAbrirDetalhe(id) {
       ${linhasTransp.map(([k, v]) => `<span><span style="color:var(--text-3)">${k}:</span> <strong>${escHtml(v || '—')}</strong></span>`).join('')}
     </div>
 
-    <div class="tfl-secao">Itens · origem ${escHtml(t.nome_armazem_origem || '—')}</div>
+    <div class="tfl-secao">Itens · origem ${escHtml(t.nome_armazem_origem || '—')}${t.nome_armazem_destino ? ' · destino ' + escHtml(t.nome_armazem_destino) : ''}</div>
     <div style="overflow-x:auto;margin-bottom:14px"><table>
-      <thead><tr><th>Item</th><th>Código</th><th style="text-align:center">Qtd.</th><th style="text-align:right">Vl. unit.</th><th style="text-align:right">Total</th></tr></thead>
-      <tbody>${(t.itens || []).map(i => `<tr>
+      <thead><tr><th>Item</th><th>Código</th><th style="text-align:center">Qtd.</th><th style="text-align:right">Vl. unit.</th><th style="text-align:right">Total</th>${temRec ? '<th style="text-align:center">Recebido</th>' : ''}</tr></thead>
+      <tbody>${(t.itens || []).map(i => {
+        const recebido = i.quantidade_recebida == null ? null : Number(i.quantidade_recebida);
+        const colRec = !temRec ? '' : `<td style="text-align:center">${recebido == null ? '—'
+          : `<strong style="color:${recebido < Number(i.quantidade) ? 'var(--red)' : 'var(--green)'}">${recebido}</strong>`}
+          ${i.motivo_divergencia ? `<div style="font-size:10px;color:var(--red)">${escHtml(i.motivo_divergencia)}</div>` : ''}
+          ${i.cadastro_criado ? '<div style="font-size:10px;color:var(--text-3)">🆕 cadastrado no destino</div>' : ''}</td>`;
+        return `<tr>
         <td class="td-main">${escHtml(i.descricao)}</td><td style="font-size:11px">${escHtml(i.codigo || '—')}</td>
         <td style="text-align:center">${Number(i.quantidade)}</td>
         <td style="text-align:right">${tflDinheiro(i.valor_unitario)}</td>
-        <td style="text-align:right;font-weight:600">${tflDinheiro(Number(i.quantidade) * Number(i.valor_unitario))}</td></tr>`).join('')}
-        <tr><td colspan="4" style="text-align:right;color:var(--text-3);font-size:11px">Valor total</td><td style="text-align:right;font-weight:800;color:var(--accent-text)">${tflDinheiro(t.valor_total)}</td></tr>
+        <td style="text-align:right;font-weight:600">${tflDinheiro(Number(i.quantidade) * Number(i.valor_unitario))}</td>${colRec}</tr>`;
+      }).join('')}
+        <tr><td colspan="4" style="text-align:right;color:var(--text-3);font-size:11px">Valor total</td><td style="text-align:right;font-weight:800;color:var(--accent-text)">${tflDinheiro(t.valor_total)}</td>${temRec ? '<td></td>' : ''}</tr>
       </tbody></table></div>
 
     <div class="tfl-secao">Volumes (${(t.volumes || []).length})</div>
@@ -9523,17 +9584,221 @@ async function tflAbrirDetalhe(id) {
       </div>`).join('')}
     </div>
 
-    <div style="display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px">
+    <div style="display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;margin-bottom:14px">
       <span><span style="color:var(--text-3)">Centro de custo:</span> <strong>${escHtml(t.centro_custo || '—')}</strong></span>
       <span><span style="color:var(--text-3)">Área:</span> <strong>${escHtml(t.area || '—')}</strong></span>
       ${t.observacao ? `<span><span style="color:var(--text-3)">Observação:</span> ${escHtml(t.observacao)}</span>` : ''}
     </div>
-    ${t.motivo_recusa ? `<div style="margin-top:12px;font-size:12px;color:var(--red)">Motivo da recusa: ${escHtml(t.motivo_recusa)}</div>` : ''}`;
+
+    <div class="tfl-secao">Nota fiscal</div>
+    <div style="font-size:12px;margin-bottom:${podeAnexar ? '8px' : '14px'}">
+      ${linkNf ? `📄 ${t.nf_numero ? 'NF nº ' + escHtml(t.nf_numero) + ' — ' : ''}<a href="${escHtml(linkNf)}" target="_blank" rel="noopener" style="color:var(--accent-text)">abrir PDF</a>
+         <span style="color:var(--text-3)"> · anexada por ${escHtml(t.nf_anexada_por || '—')} em ${tflDataHora(t.nf_anexada_em)}</span>`
+        : `<span style="color:var(--text-3)">${['AGUARDANDO_ACEITE'].includes(t.status) ? 'A origem anexa a NF depois do aceite.' : 'Nenhuma NF anexada.'}</span>`}
+    </div>
+    ${podeAnexar ? `
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;background:var(--bg);border-radius:var(--radius-md);padding:10px 12px;margin-bottom:14px">
+      <div><label class="form-label">Nº da NF</label><input id="tflNfNumero" class="form-input" style="width:130px" value="${escHtml(t.nf_numero || '')}"></div>
+      <div style="flex:1;min-width:200px"><label class="form-label">PDF da nota fiscal *</label><input id="tflNfArquivo" type="file" accept="application/pdf" class="form-input"></div>
+      <button class="btn btn-primary" id="tflBtnNF" onclick="tflAnexarNF('${idJs}')">${t.nf_pdf_url ? '🔁 Trocar NF' : '📎 Anexar NF'}</button>
+    </div>` : ''}
+
+    <div class="tfl-secao">Histórico</div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      ${eventos.map(([ic, txt, quando, por]) => `<div style="display:flex;gap:8px;font-size:12px">
+        <span style="width:18px;text-align:center">${ic}</span>
+        <div><div style="color:var(--text-1)">${escHtml(txt)}</div><div style="font-size:10px;color:var(--text-3)">${tflDataHora(quando)} · ${escHtml(por || '—')}</div></div>
+      </div>`).join('')}
+    </div>`;
+
+  const botoes = [];
+  if (souOrigem && podeEnv && ['AGUARDANDO_ACEITE', 'ACEITA', 'NF_ANEXADA'].includes(t.status)) {
+    botoes.push(`<button class="btn btn-ghost" style="color:var(--red);margin-right:auto" onclick="tflCancelar('${idJs}')">🚫 Cancelar transferência</button>`);
+  }
+  if (souDestino && podeRec && t.status === 'AGUARDANDO_ACEITE') {
+    botoes.push(`<button class="btn btn-ghost" style="color:var(--red)" onclick="tflRecusar('${idJs}')">✖ Recusar</button>`);
+    botoes.push(`<button class="btn btn-primary" onclick="tflAceitar('${idJs}')">✔ Aceitar</button>`);
+  }
+  if (souDestino && podeRec && t.status === 'NF_ANEXADA') {
+    botoes.push(`<button class="btn btn-primary" onclick="tflAbrirRecebimento('${idJs}')">📥 Registrar recebimento</button>`);
+  }
+  botoes.push(`<button class="btn btn-ghost" onclick="tflBaixar('${idJs}','xlsx','${escJs(t.numero)}')">📊 Excel</button>`);
+  botoes.push(`<button class="btn btn-ghost" onclick="tflBaixar('${idJs}','pdf','${escJs(t.numero)}')">📄 PDF</button>`);
+  document.getElementById('tflDetRodape').innerHTML = botoes.join('');
+}
+
+// Pede um motivo num modal por cima do detalhe. Resolve com o texto, ou null se voltar.
+function tflPedirMotivo(titulo, explicacao, rotulo) {
+  return new Promise(resolve => {
+    document.getElementById('modalTflMotivo')?.remove();
+    const m = document.createElement('div');
+    m.className = 'modal-overlay modal-acima';
+    m.id = 'modalTflMotivo';
+    m.innerHTML = `
+      <div class="modal-box" style="max-width:460px;width:100%">
+        <div class="modal-header"><div class="modal-title">${escHtml(titulo)}</div><button class="modal-close" data-acao="fechar">×</button></div>
+        <div class="modal-body">
+          <div style="font-size:12px;color:var(--text-2);margin-bottom:8px">${escHtml(explicacao)}</div>
+          <textarea id="tflMotivoTexto" class="form-input" rows="3" style="width:100%;resize:vertical" placeholder="Descreva o motivo"></textarea>
+        </div>
+        <div class="modal-footer" style="display:flex;justify-content:flex-end;gap:8px">
+          <button class="btn btn-ghost" data-acao="fechar">Voltar</button>
+          <button class="btn btn-primary" data-acao="ok">${escHtml(rotulo)}</button>
+        </div>
+      </div>`;
+    const fechar = (v) => { m.remove(); resolve(v); };
+    m.addEventListener('click', ev => {
+      const acao = ev.target.closest('[data-acao]')?.dataset.acao;
+      if (acao === 'fechar') fechar(null);
+      if (acao === 'ok') {
+        const v = m.querySelector('#tflMotivoTexto').value.trim();
+        if (v.length < 5) { toast('Descreva o motivo (mínimo 5 caracteres)', 'warn'); return; }
+        fechar(v);
+      }
+    });
+    document.body.appendChild(m);
+    setTimeout(() => m.querySelector('#tflMotivoTexto')?.focus(), 50);
+  });
+}
+
+async function tflDepoisDeAcao(id) {
+  await tflCarregarLista();
+  await tflAbrirDetalhe(id);
+}
+
+async function tflAceitar(id) {
+  const t = _tflDetalhe;
+  const quebra = String.fromCharCode(10, 10);
+  if (!confirm(`Aceitar a transferência ${t?.numero || ''}?${quebra}Ao aceitar, o material sai do estoque da filial de origem.`)) return;
+  const res = await api(`/transferencias-filiais/${id}/aceitar`, { method: 'POST', body: '{}' });
+  if (!res?.ok) { toast(res?.erro || 'Erro ao aceitar a transferência', 'error', 9000); return; }
+  toast(res.mensagem || 'Transferência aceita', 'success', 6000);
+  await tflDepoisDeAcao(id);
+}
+
+async function tflRecusar(id) {
+  const motivo = await tflPedirMotivo('Recusar transferência', 'A filial de origem vai ver este motivo. Nada sai do estoque.', 'Recusar');
+  if (!motivo) return;
+  const res = await api(`/transferencias-filiais/${id}/recusar`, { method: 'POST', body: JSON.stringify({ motivo }) });
+  if (!res?.ok) { toast(res?.erro || 'Erro ao recusar', 'error', 7000); return; }
+  toast('Transferência recusada', 'success');
+  await tflDepoisDeAcao(id);
+}
+
+async function tflCancelar(id) {
+  const jaSaiu = _tflDetalhe && _tflDetalhe.status !== 'AGUARDANDO_ACEITE';
+  const motivo = await tflPedirMotivo('Cancelar transferência',
+    jaSaiu ? 'A transferência já foi aceita: ao cancelar, o material volta para o estoque de origem.' : 'O destino ainda não aceitou — nada saiu do estoque.',
+    'Cancelar transferência');
+  if (!motivo) return;
+  // Pode devolver material a um armazém em inventário: passa pelo fluxo de liberação.
+  const res = await apiMovimentacao(`/transferencias-filiais/${id}/cancelar`, { motivo });
+  if (!res?.ok) { toast(res?.erro || 'Erro ao cancelar', 'error', 8000); return; }
+  toast(`Transferência cancelada${res.devolvidos ? ' — material devolvido ao estoque' : ''}`, 'success', 6000);
+  await tflDepoisDeAcao(id);
+}
+
+async function tflAnexarNF(id) {
+  const arq = document.getElementById('tflNfArquivo')?.files?.[0];
+  if (!arq) { toast('Selecione o PDF da nota fiscal', 'warn'); return; }
+  if (arq.type !== 'application/pdf') { toast('Apenas arquivos PDF são aceitos', 'warn'); return; }
+  const fd = new FormData();
+  fd.append('nf_numero', tflVal('tflNfNumero'));
+  fd.append('arquivo', arq);
+  const btn = document.getElementById('tflBtnNF');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Enviando...'; }
+  try {
+    const r = await fetch(`${API}/transferencias-filiais/${id}/nf`, { method: 'POST', headers: { Authorization: `Bearer ${GCA.token}` }, body: fd });
+    const j = await r.json().catch(() => ({}));
+    if (!j?.ok) { toast(j?.erro || 'Erro ao enviar a NF', 'error', 8000); return; }
+    toast('Nota fiscal anexada — a filial de destino já pode registrar o recebimento', 'success', 6000);
+    await tflDepoisDeAcao(id);
+  } catch {
+    toast('Erro ao enviar a NF', 'error');
+  } finally {
+    if (btn && document.body.contains(btn)) { btn.disabled = false; btn.textContent = '📎 Anexar NF'; }
+  }
+}
+
+// ── Recebimento: mesma ideia do recebimento da SC — confere o que chegou e dá entrada ──
+let _tflPrevia = [];
+
+async function tflAbrirRecebimento(id) {
+  const res = await api(`/transferencias-filiais/${id}/previa-recebimento`);
+  if (!res?.ok) { toast(res?.erro || 'Erro ao carregar os itens', 'error'); return; }
+  _tflPrevia = (res.data || []).filter(i => !i.recebido_em);
+  const t = _tflDetalhe;
+
+  let arms = _armazens || [];
+  if (GCA.usuario?.role !== 'admin') {
+    let meus = [];
+    try { meus = Array.isArray(GCA.usuario?.armazens) ? GCA.usuario.armazens : JSON.parse(GCA.usuario?.armazens || '[]'); } catch {}
+    if (meus.length) arms = arms.filter(a => meus.includes(a.id));
+  }
+
+  document.getElementById('tflDetSub').textContent = 'Registrar recebimento — confira item por item';
+  document.getElementById('tflDetBody').innerHTML = `
+    <div style="font-size:12px;color:var(--text-2);margin-bottom:12px">
+      O estoque recebe <strong>só a quantidade que chegou</strong>. Se chegou menos do que foi enviado, informe o motivo — fica registrado como divergência nas duas filiais.
+    </div>
+    <div style="max-width:360px;margin-bottom:14px">
+      <label class="form-label">Armazém onde o material vai entrar *</label>
+      <select id="tflRecArmazem" class="form-input">
+        <option value="">Selecione...</option>
+        ${arms.map(a => `<option value="${escHtml(a.id)}" ${t?.armazem_destino_id === a.id ? 'selected' : ''}>${escHtml(a.nome)}</option>`).join('')}
+      </select>
+    </div>
+    <div style="overflow-x:auto"><table>
+      <thead><tr><th>Item</th><th>No estoque daqui</th><th style="text-align:center">Enviado</th><th style="text-align:center">Chegou</th><th>Motivo da divergência</th></tr></thead>
+      <tbody>${_tflPrevia.map((i, n) => `<tr>
+        <td class="td-main">${escHtml(i.descricao)}<div style="font-size:10px;color:var(--text-3)">${escHtml(i.codigo || 's/ código')}</div></td>
+        <td style="font-size:11px">${i.item_destino
+          ? `<span style="color:var(--green)">✔ ${escHtml(i.item_destino.descricao)}</span>`
+          : '<span style="color:var(--yellow)">🆕 será cadastrado (cópia da origem)</span>'}</td>
+        <td style="text-align:center">${i.quantidade}</td>
+        <td style="text-align:center"><input type="number" min="0" max="${i.quantidade}" value="${i.quantidade}" id="tflRecQtd_${n}" class="form-input" style="width:80px;text-align:center" oninput="tflRecQtdMudou(${n})"></td>
+        <td><input id="tflRecMotivo_${n}" class="form-input" placeholder="só se chegou menos" disabled></td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
 
   document.getElementById('tflDetRodape').innerHTML = `
-    <button class="btn btn-ghost" onclick="tflBaixar('${escJs(t.id)}','xlsx','${escJs(t.numero)}')">📊 Excel</button>
-    <button class="btn btn-primary" onclick="tflBaixar('${escJs(t.id)}','pdf','${escJs(t.numero)}')">📄 PDF</button>`;
-  document.getElementById('modalTflDetalhe').classList.remove('hidden');
+    <button class="btn btn-ghost" style="margin-right:auto" onclick="tflAbrirDetalhe('${escJs(id)}')">← Voltar</button>
+    <button class="btn btn-primary" onclick="tflConfirmarRecebimento('${escJs(id)}')">✅ Confirmar recebimento</button>`;
+}
+
+function tflRecQtdMudou(n) {
+  const i = _tflPrevia[n];
+  const q = Number(document.getElementById(`tflRecQtd_${n}`).value);
+  const mot = document.getElementById(`tflRecMotivo_${n}`);
+  const falta = Number.isFinite(q) && q < i.quantidade;
+  mot.disabled = !falta;
+  if (!falta) mot.value = '';
+  mot.style.borderColor = falta ? 'var(--yellow)' : '';
+}
+
+async function tflConfirmarRecebimento(id) {
+  const arm = tflVal('tflRecArmazem');
+  if (!arm) { toast('Selecione o armazém onde o material vai entrar', 'warn'); return; }
+  const itens = [];
+  let divergencias = 0;
+  for (let n = 0; n < _tflPrevia.length; n++) {
+    const i = _tflPrevia[n];
+    const bruto = document.getElementById(`tflRecQtd_${n}`).value;
+    const q = Number(bruto);
+    if (bruto === '' || !Number.isFinite(q) || q < 0) { toast(`Informe quanto chegou de "${i.descricao}"`, 'warn'); return; }
+    if (q > i.quantidade) { toast(`"${i.descricao}": foram enviados só ${i.quantidade}`, 'warn'); return; }
+    const motivo = tflVal(`tflRecMotivo_${n}`);
+    if (q < i.quantidade && motivo.length < 3) { toast(`"${i.descricao}": informe o motivo da divergência`, 'warn'); return; }
+    if (q < i.quantidade) divergencias++;
+    itens.push({ id: i.id, quantidade_recebida: q, motivo_divergencia: motivo });
+  }
+  if (!confirm(divergencias ? `Confirmar o recebimento com ${divergencias} item(ns) com divergência?` : 'Confirmar o recebimento de todos os itens?')) return;
+
+  const res = await apiMovimentacao(`/transferencias-filiais/${id}/receber`, { armazem_destino_id: arm, itens });
+  if (!res?.ok) { toast(res?.erro || 'Erro ao registrar o recebimento', 'error', 9000); return; }
+  toast(`Recebimento registrado${res.divergencias ? ` — ${res.divergencias} divergência(s)` : ''}${res.cadastros_criados ? ` — ${res.cadastros_criados} item(ns) cadastrado(s) automaticamente` : ''}`, 'success', 7000);
+  if (res.cadastros_criados && typeof carregarItens === 'function') carregarItens();
+  await tflDepoisDeAcao(id);
 }
 
 function limparTransferencia() {
